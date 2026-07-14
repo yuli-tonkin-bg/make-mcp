@@ -1,0 +1,402 @@
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import axios from "axios";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import dotenv from "dotenv";
+
+// --- Corporate TLS: trust Windows system root CAs (fixes "unable to verify the first certificate") ---
+// Взето 1:1 от Basecamp конектора — доказано работи в корпоративната мрежа на Tonkin.
+// Зареждането е НЕБЛОКИРАЩО: 1) мигновено от кеша, 2) свеж PowerShell експорт на заден план.
+import https from "https";
+import tls from "tls";
+import { execFile } from "child_process";
+
+const CA_CACHE_FILE = () => path.join(__dirname, ".ca_cache.pem");
+
+function applyCAs(cas) {
+  try {
+    axios.defaults.httpsAgent = new https.Agent({ ca: [...cas] });
+    console.error(`TLS: using ${cas.size} CA certificates (system + bundled)`);
+  } catch (e) { console.error("TLS agent setup failed:", e.message); }
+}
+
+function loadSystemCAsAsync() {
+  const cas = new Set(tls.rootCertificates);
+
+  // 1) Node 22+: синхронно, но мигновено (без външен процес).
+  try {
+    if (typeof tls.getCACertificates === "function") {
+      for (const c of tls.getCACertificates("system")) cas.add(c);
+      applyCAs(cas);
+      return;
+    }
+  } catch (e) { console.error("tls.getCACertificates failed:", e.message); }
+
+  // 2) Кеш от предишен старт — четенето на файл е мигновено.
+  try {
+    if (fs.existsSync(CA_CACHE_FILE())) {
+      const cached = fs.readFileSync(CA_CACHE_FILE(), "utf-8").match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) || [];
+      for (const m of cached) cas.add(m);
+      console.error(`TLS: loaded ${cached.length} cached CA certificates`);
+    }
+  } catch (e) { console.error("CA cache read failed:", e.message); }
+  applyCAs(cas);
+
+  // 3) Пресен PowerShell експорт — НА ЗАДЕН ПЛАН, не бави старта.
+  if (process.platform === "win32") {
+    const ps = "$sb = New-Object System.Text.StringBuilder; foreach ($loc in 'LocalMachine','CurrentUser') { foreach ($store in 'Root','CA') { try { Get-ChildItem \"Cert:\\$loc\\$store\" | ForEach-Object { $null = $sb.AppendLine('-----BEGIN CERTIFICATE-----'); $null = $sb.AppendLine([Convert]::ToBase64String($_.RawData, 'InsertLineBreaks')); $null = $sb.AppendLine('-----END CERTIFICATE-----') } } catch {} } }; [Console]::Out.Write($sb.ToString())";
+    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (err, stdout) => {
+      if (err) { console.error("PowerShell CA export failed:", err.message); return; }
+      const matches = String(stdout).match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) || [];
+      if (!matches.length) return;
+      for (const m of matches) cas.add(m);
+      applyCAs(cas);
+      try { fs.writeFileSync(CA_CACHE_FILE(), matches.join("\n")); } catch (e) { console.error("CA cache write failed:", e.message); }
+    });
+  }
+}
+
+dotenv.config();
+
+process.on("uncaughtException", (error) => {
+  try { process.stderr.write(`UNCAUGHT EXCEPTION: ${error && error.stack ? error.stack : String(error)}\n`); } catch (_) {}
+});
+process.on("unhandledRejection", (reason) => {
+  try { process.stderr.write(`UNHANDLED REJECTION: ${reason && reason.stack ? reason.stack : String(reason)}\n`); } catch (_) {}
+});
+process.on("beforeExit", (code) => { try { process.stderr.write(`process.beforeExit code=${code}\n`); } catch (_) {} });
+process.on("exit", (code) => { try { process.stderr.write(`process.exit code=${code}\n`); } catch (_) {} });
+process.on("SIGTERM", () => { try { process.stderr.write("SIGTERM received\n"); } catch (_) {} });
+process.on("SIGHUP", () => { try { process.stderr.write("SIGHUP received\n"); } catch (_) {} });
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PORT = Number(process.env.PORT || 3457); // различен от Basecamp (3456), за да няма сблъсък в HTTP режим
+
+// Стартираме зареждането на сертификатите чак тук (след като __dirname е готов), без да блокираме.
+loadSystemCAsAsync();
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// ============================================================================
+//  Make.com конфигурация и HTTP клиент
+// ============================================================================
+
+const API_TOKEN = (process.env.MAKE_API_TOKEN || "").trim();
+const RAW_ZONE = (process.env.MAKE_ZONE || "eu1").trim();
+const DEFAULT_ORG_ID = (process.env.MAKE_ORG_ID || "").trim();
+const DEFAULT_TEAM_ID = (process.env.MAKE_TEAM_ID || "").trim();
+
+// Съставя базовия URL от региона. Приема:
+//   "eu1"                     -> https://eu1.make.com/api/v2
+//   "eu1.make.com"            -> https://eu1.make.com/api/v2
+//   "eu1.make.celonis.com"    -> https://eu1.make.celonis.com/api/v2
+//   пълен URL / MAKE_API_BASE -> ползва се както е даден
+function resolveApiBase() {
+  const override = (process.env.MAKE_API_BASE || "").trim();
+  if (override) return override.replace(/\/+$/, "");
+  let z = RAW_ZONE.replace(/^https?:\/\//, "").replace(/\/+$/, "").replace(/\/api\/v2$/, "");
+  const host = z.includes(".") ? z : `${z}.make.com`;
+  return `https://${host}/api/v2`;
+}
+const API_BASE = resolveApiBase();
+
+function requireToken() {
+  if (!API_TOKEN) {
+    throw new Error(
+      "Липсва Make API токен. Отвори Claude Desktop → Settings → Extensions → " +
+      "'Make.com Integration' и попълни 'Make API token' (и региона/zone). " +
+      "Токенът се създава в Make: профилът горе вдясно → Profile → API/MCP access → Add token."
+    );
+  }
+}
+
+// Единен HTTP клиент за Make API. Хвърля ясни (български) грешки.
+async function makeRequest(endpoint, { method = "GET", data = null, params = null, timeout = 30000 } = {}) {
+  requireToken();
+  const config = {
+    method,
+    url: `${API_BASE}${endpoint}`,
+    headers: {
+      Authorization: `Token ${API_TOKEN}`,
+      "Content-Type": "application/json",
+      "User-Agent": "MakeMCPServer/1.1.1",
+    },
+    timeout,
+  };
+  if (params) config.params = params;
+  if (data) config.data = data;
+
+  try {
+    const res = await axios(config);
+    return res.data;
+  } catch (error) {
+    const status = error.response?.status;
+    const body = error.response?.data;
+    const msg =
+      body?.message ||
+      body?.detail ||
+      (Array.isArray(body?.errors) ? body.errors.map((e) => (typeof e === "string" ? e : JSON.stringify(e))).join("; ") : null) ||
+      error.message;
+    try { console.error(`Make API Error ${status ?? ""}:`, typeof body === "object" ? JSON.stringify(body) : body ?? error.message); } catch (_) {}
+    if (status === 401 || status === 403) {
+      throw new Error(
+        `Make API отказа достъп (${status}). Провери: ` +
+        `1) валиден ли е токенът; ` +
+        `2) правилен ли е регионът/zone — сега ползвам ${API_BASE}; грешен регион дава 401 дори с валиден токен; ` +
+        `3) има ли токенът нужните scopes (scenarios:read/write/run, teams:read, organizations:read). ` +
+        `Детайл: ${msg}`
+      );
+    }
+    throw new Error(`Make API грешка${status ? ` (${status})` : ""}: ${msg}`);
+  }
+}
+
+// Make връща колекциите под ключ (напр. { scenarios: [...] }); имената леко варират
+// между endpoint-и, затова падаме към "първия масив в обекта", ако очакваният ключ липсва.
+function pickArray(body, preferredKey) {
+  if (Array.isArray(body)) return body;
+  if (body && Array.isArray(body[preferredKey])) return body[preferredKey];
+  if (body && typeof body === "object") {
+    for (const v of Object.values(body)) if (Array.isArray(v)) return v;
+  }
+  return [];
+}
+function pickObject(body, preferredKey) {
+  if (body && body[preferredKey] && typeof body[preferredKey] === "object") return body[preferredKey];
+  return body;
+}
+
+// Авто-пагинация през pg[offset]/pg[limit] с предпазен таван.
+async function makePaginated(endpoint, key, { params = {}, pageLimit = 100, maxItems = 500 } = {}) {
+  const out = [];
+  let offset = 0;
+  let guard = 0;
+  while (guard < 100) {
+    guard++;
+    const pageParams = { ...params, "pg[limit]": pageLimit, "pg[offset]": offset };
+    const body = await makeRequest(endpoint, { params: pageParams });
+    const arr = pickArray(body, key);
+    out.push(...arr);
+    if (arr.length < pageLimit || out.length >= maxItems) break;
+    offset += pageLimit;
+  }
+  return out.slice(0, maxItems);
+}
+
+// ============================================================================
+//  Инструменти (tool implementations)
+// ============================================================================
+
+async function listOrganizations() {
+  const orgs = await makePaginated("/organizations", "organizations", { pageLimit: 100, maxItems: 200 });
+  return orgs.map((o) => ({ id: o.id, name: o.name, timezoneId: o.timezoneId, countryId: o.countryId }));
+}
+
+async function listTeams(organizationId) {
+  let orgId = (organizationId || DEFAULT_ORG_ID || "").toString().trim();
+  if (!orgId) {
+    const orgs = await makePaginated("/organizations", "organizations", { pageLimit: 100, maxItems: 200 });
+    if (orgs.length === 0) throw new Error("Този токен няма достъп до нито една организация.");
+    if (orgs.length === 1) orgId = String(orgs[0].id);
+    else {
+      return {
+        note: "Има повече от една организация. Извикай make_list_teams пак с organization_id (или задай Organization ID в настройките на разширението).",
+        organizations: orgs.map((o) => ({ id: o.id, name: o.name })),
+      };
+    }
+  }
+  const teams = await makePaginated("/teams", "teams", { params: { organizationId: orgId }, pageLimit: 100, maxItems: 200 });
+  return teams.map((t) => ({ id: t.id, name: t.name, organizationId: t.organizationId ?? Number(orgId) }));
+}
+
+async function listScenarios({ team_id, organization_id, active_only, limit } = {}) {
+  const params = {};
+  const teamId = (team_id || DEFAULT_TEAM_ID || "").toString().trim();
+  const orgId = (organization_id || DEFAULT_ORG_ID || "").toString().trim();
+  if (teamId) params.teamId = teamId;
+  else if (orgId) params.organizationId = orgId;
+  else {
+    // Опит за авто-избор, ако има точно една организация.
+    const orgs = await makePaginated("/organizations", "organizations", { pageLimit: 100, maxItems: 200 });
+    if (orgs.length === 1) params.organizationId = orgs[0].id;
+    else {
+      throw new Error(
+        "Нужен е team_id или organization_id. Извикай make_list_organizations и make_list_teams, " +
+        "за да ги намериш, или задай Organization/Team ID в настройките на разширението."
+      );
+    }
+  }
+  if (active_only) params.isActive = true;
+  const cap = Math.min(Number(limit) || 500, 2000);
+  const scenarios = await makePaginated("/scenarios", "scenarios", { params, pageLimit: 100, maxItems: cap });
+  return { count: scenarios.length, capped: scenarios.length >= cap, scenarios };
+}
+
+async function getScenario(scenarioId) {
+  if (!scenarioId) throw new Error("scenario_id е задължителен.");
+  const body = await makeRequest(`/scenarios/${encodeURIComponent(scenarioId)}`);
+  return pickObject(body, "scenario");
+}
+
+async function runScenario({ scenario_id, data, wait } = {}) {
+  if (!scenario_id) throw new Error("scenario_id е задължителен.");
+  const responsive = wait !== false; // по подразбиране изчакваме резултата (Make таймаут ~40s)
+  const payload = { data: data && typeof data === "object" ? data : {}, responsive };
+  return await makeRequest(`/scenarios/${encodeURIComponent(scenario_id)}/run`, {
+    method: "POST",
+    data: payload,
+    timeout: responsive ? 60000 : 30000,
+  });
+}
+
+async function startScenario(scenarioId) {
+  if (!scenarioId) throw new Error("scenario_id е задължителен.");
+  const body = await makeRequest(`/scenarios/${encodeURIComponent(scenarioId)}/start`, { method: "POST", data: {} });
+  return pickObject(body, "scenario");
+}
+
+async function stopScenario(scenarioId) {
+  if (!scenarioId) throw new Error("scenario_id е задължителен.");
+  const body = await makeRequest(`/scenarios/${encodeURIComponent(scenarioId)}/stop`, { method: "POST", data: {} });
+  return pickObject(body, "scenario");
+}
+
+async function listExecutions({ scenario_id, limit, status } = {}) {
+  if (!scenario_id) throw new Error("scenario_id е задължителен.");
+  const params = { "pg[limit]": Math.min(Number(limit) || 20, 100) };
+  if (status) params.status = status; // 1=success, 2=warning, 3=error
+  const body = await makeRequest(`/scenarios/${encodeURIComponent(scenario_id)}/logs`, { params });
+  return pickArray(body, "scenarioLogs");
+}
+
+async function getExecution({ scenario_id, execution_id } = {}) {
+  if (!scenario_id || !execution_id) throw new Error("scenario_id и execution_id са задължителни.");
+  return await makeRequest(`/scenarios/${encodeURIComponent(scenario_id)}/logs/${encodeURIComponent(execution_id)}`);
+}
+
+async function openInBrowser(url) {
+  if (!url) throw new Error("url е задължителен.");
+  try {
+    const { default: open } = await import("open");
+    await open(url);
+    return { url, status: "opened" };
+  } catch (e) {
+    return { url, status: "failed", message: `Не можах да отворя браузъра: ${e.message}. Отвори ръчно: ${url}` };
+  }
+}
+
+// ============================================================================
+//  MCP дефиниции
+// ============================================================================
+
+const tools = [
+  { name: "make_list_organizations", description: "List all Make.com organizations the API token has access to. Returns id + name. Use this first if you don't know the organization_id.", inputSchema: { type: "object", properties: {}, required: [] } },
+  { name: "make_list_teams", description: "List teams inside a Make.com organization (id + name). teamId is required by make_list_scenarios. If organization_id is omitted, the configured one is used, or the single org is auto-selected.", inputSchema: { type: "object", properties: { organization_id: { type: "string", description: "Organization ID (optional; falls back to configured MAKE_ORG_ID or the only org)" } }, required: [] } },
+  { name: "make_list_scenarios", description: "List Make.com scenarios (automations) for a team or organization. Provide team_id OR organization_id (falls back to the configured ones, or the single org). Set active_only=true to return only active scenarios. Results are capped (default 500); 'capped' tells you if more exist.", inputSchema: { type: "object", properties: { team_id: { type: "string", description: "Team ID to list scenarios for (preferred)" }, organization_id: { type: "string", description: "Organization ID (used if team_id is not given)" }, active_only: { type: "boolean", description: "Only active scenarios (default false)" }, limit: { type: "number", description: "Max scenarios to return (default 500, max 2000)" } }, required: [] } },
+  { name: "make_get_scenario", description: "Get full details of a single Make.com scenario by its ID (status, scheduling, team, description, etc.).", inputSchema: { type: "object", properties: { scenario_id: { type: "string", description: "The scenario ID" } }, required: ["scenario_id"] } },
+  { name: "make_run_scenario", description: "Run a Make.com scenario on demand (right now). By default waits for the run to finish and returns the result (Make waits up to ~40s); set wait=false to trigger and return the executionId immediately without waiting. 'data' is optional input passed to the scenario (only relevant if it starts with a trigger that accepts input).", inputSchema: { type: "object", properties: { scenario_id: { type: "string", description: "The scenario ID to run" }, data: { type: "object", description: "Optional input data object passed to the scenario run" }, wait: { type: "boolean", description: "Wait for completion and return the result (default true). false = fire-and-forget, returns executionId." } }, required: ["scenario_id"] } },
+  { name: "make_start_scenario", description: "Activate (turn ON / schedule) a Make.com scenario so it runs on its schedule or trigger.", inputSchema: { type: "object", properties: { scenario_id: { type: "string", description: "The scenario ID to activate" } }, required: ["scenario_id"] } },
+  { name: "make_stop_scenario", description: "Deactivate (turn OFF) a Make.com scenario so it stops running on its schedule/trigger.", inputSchema: { type: "object", properties: { scenario_id: { type: "string", description: "The scenario ID to deactivate" } }, required: ["scenario_id"] } },
+  { name: "make_list_executions", description: "List the execution history (logs) of a Make.com scenario, newest first. Shows whether runs succeeded/failed and when. Optionally filter by status (1=success, 2=warning, 3=error).", inputSchema: { type: "object", properties: { scenario_id: { type: "string", description: "The scenario ID" }, limit: { type: "number", description: "Max log entries (default 20, max 100)" }, status: { type: "number", description: "Filter: 1=success, 2=warning, 3=error" } }, required: ["scenario_id"] } },
+  { name: "make_get_execution", description: "Get full details of a single scenario execution/log (status, operations, duration, error info) by scenario_id + execution_id (from make_list_executions).", inputSchema: { type: "object", properties: { scenario_id: { type: "string", description: "The scenario ID" }, execution_id: { type: "string", description: "The execution/log ID (from make_list_executions)" } }, required: ["scenario_id", "execution_id"] } },
+  { name: "make_open_in_browser", description: "Open a Make.com URL (e.g. a scenario editor link) in the default browser on the user's computer.", inputSchema: { type: "object", properties: { url: { type: "string", description: "The URL to open" } }, required: ["url"] } },
+];
+
+async function handleTool(toolName, toolInput) {
+  switch (toolName) {
+    case "make_list_organizations": return await listOrganizations();
+    case "make_list_teams": return await listTeams(toolInput.organization_id);
+    case "make_list_scenarios": return await listScenarios(toolInput);
+    case "make_get_scenario": return await getScenario(toolInput.scenario_id);
+    case "make_run_scenario": return await runScenario(toolInput);
+    case "make_start_scenario": return await startScenario(toolInput.scenario_id);
+    case "make_stop_scenario": return await stopScenario(toolInput.scenario_id);
+    case "make_list_executions": return await listExecutions(toolInput);
+    case "make_get_execution": return await getExecution(toolInput);
+    case "make_open_in_browser": return await openInBrowser(toolInput.url);
+    default: throw new Error(`Unknown tool: ${toolName}`);
+  }
+}
+
+const server = new Server({ name: "make-mcp", version: "1.1.1" }, { capabilities: { tools: {} } });
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  try {
+    const result = await handleTool(request.params.name, request.params.arguments || {});
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    return { content: [{ type: "text", text: `Error: ${errorMessage}` }], isError: true };
+  }
+});
+
+// ============================================================================
+//  Старт
+// ============================================================================
+
+async function main() {
+  console.error("Starting Make.com MCP Server...");
+
+  const useHttp = process.argv.includes("--http") || process.argv.includes("--sse");
+
+  // HTTP режим (само за локална разработка). Импортваме express мързеливо, за да
+  // не е твърда зависимост за stdio режима, който Claude Desktop реално ползва.
+  if (useHttp) {
+    const { createMcpExpressApp } = await import("@modelcontextprotocol/sdk/server/express.js");
+    const app = createMcpExpressApp(server);
+    app.get("/health", (req, res) => res.json({ status: "ok" }));
+    app.listen(PORT, () => console.error(`HTTP server on port ${PORT}`));
+    return;
+  }
+
+  // stdio режим (както Claude Desktop пуска разширението): свързваме се веднага
+  // и не блокираме — токенът е конфигурация, проверява се при първото извикване.
+  console.error("Starting stdio server");
+  process.stdin.resume();
+  process.on("SIGINT", () => {
+    console.error("SIGINT received, shutting down server...");
+    process.exit(0);
+  });
+
+  let connected = false;
+  (async () => {
+    let attempt = 0;
+    while (!connected) {
+      attempt++;
+      try {
+        const transport = new StdioServerTransport();
+        await server.connect(transport);
+        connected = true;
+        process.stderr.write(`Make MCP stdio server started (attempt=${attempt})\n`);
+      } catch (e) {
+        process.stderr.write(`stdio connect attempt ${attempt} failed: ${e && e.message ? e.message : String(e)}\n`);
+        await sleep(Math.min(5000, 1000 * attempt));
+      }
+    }
+  })();
+
+  setInterval(() => {
+    try { process.stderr.write("heartbeat: process alive\n"); } catch (_) {}
+  }, 15000);
+
+  if (!API_TOKEN) {
+    console.error("WARNING: MAKE_API_TOKEN не е зададен — инструментите ще връщат грешка, докато не се попълни в настройките на разширението.");
+  } else {
+    console.error(`Make MCP ready. API base: ${API_BASE}`);
+  }
+
+  await new Promise(() => {}); // keep process alive
+}
+
+main().catch((error) => {
+  console.error("Fatal error:", error);
+  process.exit(1);
+});
+// v1.1.1
