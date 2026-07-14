@@ -1,0 +1,47 @@
+name: Build & Release MCPB
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # нужно за създаване на release и качване на файла
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Get version from tag
+        id: ver
+        run: echo "v=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches manifest.json and package.json
+        run: |
+          TAG_V="${{ steps.ver.outputs.v }}"
+          MANIFEST_V=$(node -p "require('./manifest.json').version")
+          PKG_V=$(node -p "require('./package.json').version")
+          echo "tag=$TAG_V  manifest=$MANIFEST_V  package=$PKG_V"
+          if [ "$TAG_V" != "$MANIFEST_V" ] || [ "$TAG_V" != "$PKG_V" ]; then
+            echo "::error::Версията на тага ($TAG_V) не съвпада с manifest.json ($MANIFEST_V) и/или package.json ($PKG_V). Изравни версиите и тагни отново."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Pack .mcpb
+        run: npx --yes @anthropic-ai/mcpb pack . "Make-mcp-${{ steps.ver.outputs.v }}.mcpb"
+
+      - name: Create release & upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "Make-mcp-${{ steps.ver.outputs.v }}.mcpb" \
+            --title "make-mcp-$GITHUB_REF_NAME" \
+            --notes "Автоматичен билд на $GITHUB_REF_NAME"
