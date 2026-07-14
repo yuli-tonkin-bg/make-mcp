@@ -1,0 +1,4 @@
+node_modules/
+.ca_cache.pem
+.env
+*.mcpb

@@ -1,0 +1,106 @@
+{
+  "manifest_version": "0.2",
+  "name": "make-mcp",
+  "display_name": "Make.com Integration for Tonkin Team",
+  "version": "1.1.1",
+  "description": "Make.com (Integromat) integration for the Tonkin team — list, run, activate/deactivate and monitor scenarios",
+  "author": {
+    "name": "Tonkin Team"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server.js"
+      ],
+      "env": {
+        "MAKE_API_TOKEN": "${user_config.api_token}",
+        "MAKE_ZONE": "${user_config.zone}",
+        "MAKE_ORG_ID": "${user_config.organization_id}",
+        "MAKE_TEAM_ID": "${user_config.team_id}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "make_list_organizations",
+      "description": "List Make.com organizations available to the token"
+    },
+    {
+      "name": "make_list_teams",
+      "description": "List teams inside a Make.com organization"
+    },
+    {
+      "name": "make_list_scenarios",
+      "description": "List Make.com scenarios for a team or organization"
+    },
+    {
+      "name": "make_get_scenario",
+      "description": "Get full details of a single scenario"
+    },
+    {
+      "name": "make_run_scenario",
+      "description": "Run a scenario on demand (optionally wait for the result)"
+    },
+    {
+      "name": "make_start_scenario",
+      "description": "Activate (turn ON) a scenario"
+    },
+    {
+      "name": "make_stop_scenario",
+      "description": "Deactivate (turn OFF) a scenario"
+    },
+    {
+      "name": "make_list_executions",
+      "description": "List a scenario's execution history (logs)"
+    },
+    {
+      "name": "make_get_execution",
+      "description": "Get details of a single scenario execution/log"
+    },
+    {
+      "name": "make_open_in_browser",
+      "description": "Open a Make.com URL in the default browser"
+    }
+  ],
+  "keywords": [
+    "make",
+    "integromat",
+    "automation",
+    "scenarios",
+    "mcp"
+  ],
+  "license": "MIT",
+  "user_config": {
+    "api_token": {
+      "type": "string",
+      "title": "Make API token",
+      "description": "API токенът от Make. Създава се от: аватара горе вдясно → Profile → API / MCP access → Add token. Дай му права (scopes): scenarios:read, scenarios:write, scenarios:run, teams:read, organizations:read.",
+      "required": true,
+      "sensitive": true
+    },
+    "zone": {
+      "type": "string",
+      "title": "Region (zone)",
+      "description": "Регионът на твоя Make акаунт — виждаш го в URL-а на Make дашборда: напр. eu1.make.com → въведи 'eu1'. Възможни: eu1, eu2, us1, us2. Може и пълен хост (напр. eu1.make.celonis.com). Грешен регион дава грешка за достъп дори с валиден токен.",
+      "required": false,
+      "default": "eu1"
+    },
+    "organization_id": {
+      "type": "string",
+      "title": "Organization ID (по желание)",
+      "description": "ID на организацията по подразбиране. Ако е празно и имаш само една организация, тя се избира автоматично. Иначе използвай make_list_organizations.",
+      "required": false,
+      "default": ""
+    },
+    "team_id": {
+      "type": "string",
+      "title": "Team ID (по желание)",
+      "description": "ID на екипа по подразбиране за списъка със сценарии. Ако е празно, се пада към организацията. Намери го с make_list_teams.",
+      "required": false,
+      "default": ""
+    }
+  }
+}

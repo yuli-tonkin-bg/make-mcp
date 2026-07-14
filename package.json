@@ -1,0 +1,22 @@
+{
+  "name": "make-mcp",
+  "version": "1.1.1",
+  "type": "module",
+  "description": "Model Context Protocol server for Make.com (Integromat) integration",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "start:http": "node server.js --http",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "open": "^9.1.0"
+  }
+}

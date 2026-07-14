@@ -1,0 +1,5 @@
+.git
+.github
+.env
+.ca_cache.pem
+*.mcpb
