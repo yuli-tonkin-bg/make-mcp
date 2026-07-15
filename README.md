@@ -26,6 +26,7 @@ MCP конектор (разширение за Claude Desktop), който св
 - **Сценарии:** `make_list_scenarios`, `make_get_scenario`
 - **Действия:** `make_run_scenario` (пусни сега), `make_start_scenario` (активирай), `make_stop_scenario` (деактивирай)
 - **Следене:** `make_list_executions` (история), `make_get_execution` (детайли за едно изпълнение)
+- **Data stores:** `make_list_data_stores`, `make_get_records`, `make_add_record`, `make_update_record`, `make_delete_record` (триене само на конкретни ключове)
 - **Друго:** `make_open_in_browser`
 
 ## Настройка (за потребители)
@@ -36,7 +37,7 @@ MCP конектор (разширение за Claude Desktop), който св
 2. Claude Desktop → Settings → Extensions → **Install from file** → избери `.mcpb`.
 3. При инсталация попълни:
    - **Make API token** — създава се в Make: аватара горе вдясно → *Profile → API / MCP access → Add token*.
-     Дай му scopes: `scenarios:read`, `scenarios:write`, `scenarios:run`, `teams:read`, `organizations:read`.
+     Дай му scopes: `scenarios:read`, `scenarios:write`, `scenarios:run`, `teams:read`, `organizations:read`, `datastores:read`, `datastores:write`.
    - **Region (zone)** — виждаш го в URL-а на Make дашборда (напр. `eu1.make.com` → въведи `eu1`).
      Възможни: `eu1`, `eu2`, `us1`, `us2`. Грешен регион дава грешка за достъп дори с валиден токен.
    - **Organization ID / Team ID** (по желание) — ако имаш само една организация, се избира автоматично.
@@ -70,7 +71,7 @@ $env:MAKE_API_TOKEN="…"; $env:MAKE_ZONE="eu1"; node server.js
 
 ```
 npm install
-npx @anthropic-ai/mcpb pack . Make-MAC-<версия>.mcpb
+npx @anthropic-ai/mcpb pack . Make-mcp-<версия>.mcpb
 ```
 
 `.mcpb` е zip с `manifest.json` в корена. `.mcpbignore` изключва `.git`, `.env` и др.

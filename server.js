@@ -133,7 +133,7 @@ async function makeRequest(endpoint, { method = "GET", data = null, params = nul
     headers: {
       Authorization: `Token ${API_TOKEN}`,
       "Content-Type": "application/json",
-      "User-Agent": "MakeMCPServer/1.1.2",
+      "User-Agent": "MakeMCPServer/1.2.0",
     },
     timeout,
   };
@@ -303,6 +303,55 @@ async function openInBrowser(url) {
   }
 }
 
+// ---- Data stores (v1.2.0) ----
+
+// Резолвва team_id: параметър → конфигурация → единственият екип на (единствената) организация.
+async function resolveTeamId(teamId) {
+  const t = (teamId || DEFAULT_TEAM_ID || "").toString().trim();
+  if (t) return t;
+  const orgs = await makePaginated("/organizations", "organizations", { pageLimit: 100, maxItems: 200 });
+  const orgId = orgs.length === 1 ? orgs[0].id : (DEFAULT_ORG_ID || null);
+  if (!orgId) throw new Error("Нужен е team_id. Извикай make_list_teams, за да го намериш, или задай Team ID в настройките.");
+  const teams = await makePaginated("/teams", "teams", { params: { organizationId: orgId }, pageLimit: 100, maxItems: 200 });
+  if (teams.length === 1) return String(teams[0].id);
+  throw new Error("Нужен е team_id (има повече от един екип). Извикай make_list_teams и подай team_id.");
+}
+
+async function listDataStores({ team_id, limit } = {}) {
+  const teamId = await resolveTeamId(team_id);
+  const cap = Math.min(Number(limit) || 200, 1000);
+  const stores = await makePaginated("/data-stores", "dataStores", { params: { teamId }, pageLimit: 100, maxItems: cap });
+  return { count: stores.length, dataStores: stores };
+}
+
+async function getRecords({ data_store_id, limit } = {}) {
+  if (!data_store_id) throw new Error("data_store_id е задължителен.");
+  const cap = Math.min(Number(limit) || 100, 1000);
+  const records = await makePaginated(`/data-stores/${encodeURIComponent(data_store_id)}/data`, "records", { pageLimit: 100, maxItems: cap });
+  return { count: records.length, capped: records.length >= cap, records };
+}
+
+async function addRecord({ data_store_id, data, key } = {}) {
+  if (!data_store_id) throw new Error("data_store_id е задължителен.");
+  if (!data || typeof data !== "object") throw new Error("data трябва да е обект с полетата на записа.");
+  const payload = { data };
+  if (key !== undefined && key !== null && String(key).length) payload.key = String(key);
+  return await makeRequest(`/data-stores/${encodeURIComponent(data_store_id)}/data`, { method: "POST", data: payload });
+}
+
+async function updateRecord({ data_store_id, key, data } = {}) {
+  if (!data_store_id || key === undefined || key === null || !String(key).length) throw new Error("data_store_id и key са задължителни.");
+  if (!data || typeof data !== "object") throw new Error("data трябва да е обект с новите стойности на записа.");
+  return await makeRequest(`/data-stores/${encodeURIComponent(data_store_id)}/data/${encodeURIComponent(key)}`, { method: "PUT", data });
+}
+
+async function deleteRecord({ data_store_id, keys } = {}) {
+  if (!data_store_id) throw new Error("data_store_id е задължителен.");
+  const list = Array.isArray(keys) ? keys.map(String).filter((k) => k.length) : (keys ? [String(keys)] : []);
+  if (!list.length) throw new Error("Подай поне един ключ (keys) за триене. Триене на ВСИЧКИ записи не се поддържа от този инструмент нарочно.");
+  return await makeRequest(`/data-stores/${encodeURIComponent(data_store_id)}/data`, { method: "DELETE", params: { confirmed: true }, data: { keys: list } });
+}
+
 // ============================================================================
 //  MCP дефиниции
 // ============================================================================
@@ -312,12 +361,17 @@ const tools = [
   { name: "make_list_teams", description: "List teams inside a Make.com organization (id + name). teamId is required by make_list_scenarios. If organization_id is omitted, the configured one is used, or the single org is auto-selected.", inputSchema: { type: "object", properties: { organization_id: { type: "string", description: "Organization ID (optional; falls back to configured MAKE_ORG_ID or the only org)" } }, required: [] } },
   { name: "make_list_scenarios", description: "List Make.com scenarios (automations) for a team or organization. Provide team_id OR organization_id (falls back to the configured ones, or the single org). Set active_only=true to return only active scenarios. Results are capped (default 500); 'capped' tells you if more exist.", inputSchema: { type: "object", properties: { team_id: { type: "string", description: "Team ID to list scenarios for (preferred)" }, organization_id: { type: "string", description: "Organization ID (used if team_id is not given)" }, active_only: { type: "boolean", description: "Only active scenarios (default false)" }, limit: { type: "number", description: "Max scenarios to return (default 500, max 2000)" } }, required: [] } },
   { name: "make_get_scenario", description: "Get full details of a single Make.com scenario by its ID (status, scheduling, team, description, etc.).", inputSchema: { type: "object", properties: { scenario_id: { type: "string", description: "The scenario ID" } }, required: ["scenario_id"] } },
-  { name: "make_run_scenario", description: "Run a Make.com scenario on demand (right now). By default waits for the run to finish and returns the result (Make waits up to ~40s); set wait=false to trigger and return the executionId immediately without waiting. 'data' is optional input passed to the scenario (only relevant if it starts with a trigger that accepts input).", inputSchema: { type: "object", properties: { scenario_id: { type: "string", description: "The scenario ID to run" }, data: { type: "object", description: "Optional input data object passed to the scenario run" }, wait: { type: "boolean", description: "Wait for completion and return the result (default true). false = fire-and-forget, returns executionId." } }, required: ["scenario_id"] } },
+  { name: "make_run_scenario", description: "Run a Make.com scenario on demand (right now). By default waits for the run to finish and returns the result (Make waits up to ~40s); set wait=false to trigger and return the executionId immediately without waiting. 'data' is optional input passed to the scenario (only relevant if it starts with a trigger that accepts input). NOTE: the scenario must be ACTIVE — Make returns HTTP 422 'Scenario is not activated' for an inactive scenario; if needed, activate it first with make_start_scenario.", inputSchema: { type: "object", properties: { scenario_id: { type: "string", description: "The scenario ID to run" }, data: { type: "object", description: "Optional input data object passed to the scenario run" }, wait: { type: "boolean", description: "Wait for completion and return the result (default true). false = fire-and-forget, returns executionId." } }, required: ["scenario_id"] } },
   { name: "make_start_scenario", description: "Activate (turn ON / schedule) a Make.com scenario so it runs on its schedule or trigger.", inputSchema: { type: "object", properties: { scenario_id: { type: "string", description: "The scenario ID to activate" } }, required: ["scenario_id"] } },
   { name: "make_stop_scenario", description: "Deactivate (turn OFF) a Make.com scenario so it stops running on its schedule/trigger.", inputSchema: { type: "object", properties: { scenario_id: { type: "string", description: "The scenario ID to deactivate" } }, required: ["scenario_id"] } },
   { name: "make_list_executions", description: "List the execution history (logs) of a Make.com scenario, newest first. Shows whether runs succeeded/failed and when. Optionally filter by status (1=success, 2=warning, 3=error).", inputSchema: { type: "object", properties: { scenario_id: { type: "string", description: "The scenario ID" }, limit: { type: "number", description: "Max log entries (default 20, max 100)" }, status: { type: "number", description: "Filter: 1=success, 2=warning, 3=error" } }, required: ["scenario_id"] } },
   { name: "make_get_execution", description: "Get full details of a single scenario execution/log (status, operations, duration, error info) by scenario_id + execution_id (from make_list_executions).", inputSchema: { type: "object", properties: { scenario_id: { type: "string", description: "The scenario ID" }, execution_id: { type: "string", description: "The execution/log ID (from make_list_executions)" } }, required: ["scenario_id", "execution_id"] } },
   { name: "make_open_in_browser", description: "Open a Make.com URL (e.g. a scenario editor link) in the default browser on the user's computer.", inputSchema: { type: "object", properties: { url: { type: "string", description: "The URL to open" } }, required: ["url"] } },
+  { name: "make_list_data_stores", description: "List Make.com data stores (Make's built-in lightweight database) for a team. team_id falls back to the configured team or the only team. Returns id, name and record info.", inputSchema: { type: "object", properties: { team_id: { type: "string", description: "Team ID (optional; falls back to configured MAKE_TEAM_ID or the only team)" }, limit: { type: "number", description: "Max data stores to return (default 200)" } }, required: [] } },
+  { name: "make_get_records", description: "List the records in a Make.com data store. Each record has a 'key' and a 'data' object. Results are capped (default 100).", inputSchema: { type: "object", properties: { data_store_id: { type: "string", description: "The data store ID (from make_list_data_stores)" }, limit: { type: "number", description: "Max records to return (default 100, max 1000)" } }, required: ["data_store_id"] } },
+  { name: "make_add_record", description: "Add a new record to a Make.com data store. 'data' is an object with the record's fields (must match the data store's structure). 'key' is optional — Make auto-generates one if omitted.", inputSchema: { type: "object", properties: { data_store_id: { type: "string", description: "The data store ID" }, data: { type: "object", description: "The record's fields as an object" }, key: { type: "string", description: "Optional record key (auto-generated if omitted)" } }, required: ["data_store_id", "data"] } },
+  { name: "make_update_record", description: "Replace an existing record in a Make.com data store, identified by its key. 'data' is the full new object for the record (it REPLACES the record).", inputSchema: { type: "object", properties: { data_store_id: { type: "string", description: "The data store ID" }, key: { type: "string", description: "The key of the record to replace" }, data: { type: "object", description: "The new record fields as an object (replaces the record)" } }, required: ["data_store_id", "key", "data"] } },
+  { name: "make_delete_record", description: "Delete SPECIFIC record(s) from a Make.com data store by key(s). Pass 'keys' as an array of the record keys to delete — ONLY those are removed. Deleting ALL records is intentionally NOT supported here, for safety.", inputSchema: { type: "object", properties: { data_store_id: { type: "string", description: "The data store ID" }, keys: { type: "array", items: { type: "string" }, description: "Array of record keys to delete (only these are removed)" } }, required: ["data_store_id", "keys"] } },
 ];
 
 async function handleTool(toolName, toolInput) {
@@ -332,11 +386,16 @@ async function handleTool(toolName, toolInput) {
     case "make_list_executions": return await listExecutions(toolInput);
     case "make_get_execution": return await getExecution(toolInput);
     case "make_open_in_browser": return await openInBrowser(toolInput.url);
+    case "make_list_data_stores": return await listDataStores(toolInput);
+    case "make_get_records": return await getRecords(toolInput);
+    case "make_add_record": return await addRecord(toolInput);
+    case "make_update_record": return await updateRecord(toolInput);
+    case "make_delete_record": return await deleteRecord(toolInput);
     default: throw new Error(`Unknown tool: ${toolName}`);
   }
 }
 
-const server = new Server({ name: "make-mcp", version: "1.1.2" }, { capabilities: { tools: {} } });
+const server = new Server({ name: "make-mcp", version: "1.2.0" }, { capabilities: { tools: {} } });
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
@@ -416,4 +475,4 @@ main().catch((error) => {
   console.error("Fatal error:", error);
   process.exit(1);
 });
-// v1.1.2
+// v1.2.0
