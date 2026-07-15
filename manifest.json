@@ -2,7 +2,7 @@
   "manifest_version": "0.2",
   "name": "make-mcp",
   "display_name": "Make.com Integration for Tonkin Team",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Make.com (Integromat) integration for the Tonkin team — list, run, activate/deactivate and monitor scenarios",
   "author": {
     "name": "Tonkin Team"

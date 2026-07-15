@@ -16,11 +16,18 @@ import { execFile } from "child_process";
 
 const CA_CACHE_FILE = () => path.join(__dirname, ".ca_cache.pem");
 
+// Сигнал, че сертификатите са приложени — makeRequest го изчаква преди първата HTTPS
+// заявка (сертификатите се зареждат на заден план след старта, виж v1.1.2).
+let _caReadyResolve;
+const caReady = new Promise((res) => { _caReadyResolve = res; });
+function markCaReady() { if (_caReadyResolve) { _caReadyResolve(); _caReadyResolve = null; } }
+
 function applyCAs(cas) {
   try {
     axios.defaults.httpsAgent = new https.Agent({ ca: [...cas] });
     console.error(`TLS: using ${cas.size} CA certificates (system + bundled)`);
   } catch (e) { console.error("TLS agent setup failed:", e.message); }
+  markCaReady();
 }
 
 function loadSystemCAsAsync() {
@@ -75,8 +82,10 @@ process.on("SIGHUP", () => { try { process.stderr.write("SIGHUP received\n"); } 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3457); // различен от Basecamp (3456), за да няма сблъсък в HTTP режим
 
-// Стартираме зареждането на сертификатите чак тук (след като __dirname е готов), без да блокираме.
-loadSystemCAsAsync();
+// ВАЖНО (v1.1.2): сертификатите се зареждат СЛЕД като stdio транспортът се закачи
+// (виж main) — за да отговори `initialize` мигновено дори при студен старт. Иначе
+// синхронното зареждане на корпоративните сертификати бавеше старта >5 сек и Claude
+// Desktop показваше "Unable to connect to extension server" при първа инсталация.
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -124,12 +133,16 @@ async function makeRequest(endpoint, { method = "GET", data = null, params = nul
     headers: {
       Authorization: `Token ${API_TOKEN}`,
       "Content-Type": "application/json",
-      "User-Agent": "MakeMCPServer/1.1.1",
+      "User-Agent": "MakeMCPServer/1.1.2",
     },
     timeout,
   };
   if (params) config.params = params;
   if (data) config.data = data;
+
+  // Изчакваме сертификатите да са готови (зареждат се на заден план след старта),
+  // но най-много 10 сек, за да не увиснем.
+  await Promise.race([caReady, new Promise((r) => setTimeout(r, 10000))]);
 
   try {
     const res = await axios(config);
@@ -323,7 +336,7 @@ async function handleTool(toolName, toolInput) {
   }
 }
 
-const server = new Server({ name: "make-mcp", version: "1.1.1" }, { capabilities: { tools: {} } });
+const server = new Server({ name: "make-mcp", version: "1.1.2" }, { capabilities: { tools: {} } });
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
@@ -349,6 +362,7 @@ async function main() {
   // HTTP режим (само за локална разработка). Импортваме express мързеливо, за да
   // не е твърда зависимост за stdio режима, който Claude Desktop реално ползва.
   if (useHttp) {
+    loadSystemCAsAsync(); // HTTP режим е само за разработка — тук латентността няма значение
     const { createMcpExpressApp } = await import("@modelcontextprotocol/sdk/server/express.js");
     const app = createMcpExpressApp(server);
     app.get("/health", (req, res) => res.json({ status: "ok" }));
@@ -375,6 +389,9 @@ async function main() {
         await server.connect(transport);
         connected = true;
         process.stderr.write(`Make MCP stdio server started (attempt=${attempt})\n`);
+        // Чак СЕГА зареждаме сертификатите — на заден план, след като връзката е готова,
+        // за да не бавим отговора на `initialize` (фикс за студен старт, v1.1.2).
+        setImmediate(() => loadSystemCAsAsync());
       } catch (e) {
         process.stderr.write(`stdio connect attempt ${attempt} failed: ${e && e.message ? e.message : String(e)}\n`);
         await sleep(Math.min(5000, 1000 * attempt));
@@ -399,4 +416,4 @@ main().catch((error) => {
   console.error("Fatal error:", error);
   process.exit(1);
 });
-// v1.1.1
+// v1.1.2
