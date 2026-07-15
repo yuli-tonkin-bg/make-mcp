@@ -2,8 +2,8 @@
   "manifest_version": "0.2",
   "name": "make-mcp",
   "display_name": "Make.com Integration for Tonkin Team",
-  "version": "1.1.2",
-  "description": "Make.com (Integromat) integration for the Tonkin team — list, run, activate/deactivate and monitor scenarios",
+  "version": "1.2.0",
+  "description": "Make.com (Integromat) integration for the Tonkin team — list, run, activate/deactivate and monitor scenarios, plus manage data stores",
   "author": {
     "name": "Tonkin Team"
   },
@@ -63,6 +63,26 @@
     {
       "name": "make_open_in_browser",
       "description": "Open a Make.com URL in the default browser"
+    },
+    {
+      "name": "make_list_data_stores",
+      "description": "List data stores (Make's built-in database) for a team"
+    },
+    {
+      "name": "make_get_records",
+      "description": "List the records in a data store"
+    },
+    {
+      "name": "make_add_record",
+      "description": "Add a record to a data store"
+    },
+    {
+      "name": "make_update_record",
+      "description": "Replace a record in a data store by key"
+    },
+    {
+      "name": "make_delete_record",
+      "description": "Delete specific record(s) from a data store by key"
     }
   ],
   "keywords": [
@@ -77,7 +97,7 @@
     "api_token": {
       "type": "string",
       "title": "Make API token",
-      "description": "API токенът от Make. Създава се от: аватара горе вдясно → Profile → API / MCP access → Add token. Дай му права (scopes): scenarios:read, scenarios:write, scenarios:run, teams:read, organizations:read.",
+      "description": "API токенът от Make. Създава се от: аватара горе вдясно → Profile → API / MCP access → Add token. Дай му права (scopes): scenarios:read, scenarios:write, scenarios:run, teams:read, organizations:read, datastores:read, datastores:write.",
       "required": true,
       "sensitive": true
     },
