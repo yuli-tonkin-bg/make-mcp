@@ -70,8 +70,9 @@
 | Версия | Съдържание |
 |---|---|
 | **v1.1.2** ✅ | Cold-start фикс |
-| **v1.2.0** | Tier 1 (data stores, DLQ retry, webhooks) + уточнено описание на `make_run_scenario` („изисква активен сценарий") + нови scopes |
-| **v1.3.0** | Tier 2 (blueprint четене, custom variables) + rate-limit + компактни отговори |
+| **v1.2.0** ✅ | Data stores (5 инструмента) + уточнено описание на `make_run_scenario` („изисква активен сценарий") |
+| **v1.3.0** ✅ | DLQ retry + webhooks + connections (6 инструмента) |
+| **v1.4.0** | Tier 2 (blueprint четене, custom variables) + rate-limit + компактни отговори + кеш org/team |
 | **Бъдеще** | Tier 3 със защити (create/update, blueprint edit) |
 
 ---
