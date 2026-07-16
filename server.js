@@ -133,7 +133,7 @@ async function makeRequest(endpoint, { method = "GET", data = null, params = nul
     headers: {
       Authorization: `Token ${API_TOKEN}`,
       "Content-Type": "application/json",
-      "User-Agent": "MakeMCPServer/1.2.0",
+      "User-Agent": "MakeMCPServer/1.3.0",
     },
     timeout,
   };
@@ -352,6 +352,52 @@ async function deleteRecord({ data_store_id, keys } = {}) {
   return await makeRequest(`/data-stores/${encodeURIComponent(data_store_id)}/data`, { method: "DELETE", params: { confirmed: true }, data: { keys: list } });
 }
 
+// ---- Incomplete executions / DLQ, webhooks, connections (v1.3.0) ----
+
+async function listIncomplete({ scenario_id, limit } = {}) {
+  if (!scenario_id) throw new Error("scenario_id е задължителен.");
+  const cap = Math.min(Number(limit) || 50, 200);
+  const body = await makeRequest("/dlqs", { params: { scenarioId: scenario_id, "pg[limit]": cap } });
+  return pickArray(body, "dlqs");
+}
+
+async function retryExecution({ dlq_id } = {}) {
+  if (!dlq_id) throw new Error("dlq_id е задължителен (id на падналото изпълнение от make_list_incomplete).");
+  return await makeRequest(`/dlqs/${encodeURIComponent(dlq_id)}/retry`, { method: "POST", data: {} });
+}
+
+async function listHooks({ team_id } = {}) {
+  const teamId = await resolveTeamId(team_id);
+  const hooks = await makePaginated("/hooks", "hooks", { params: { teamId }, pageLimit: 100, maxItems: 300 });
+  return { count: hooks.length, hooks };
+}
+
+async function triggerWebhook({ url, data } = {}) {
+  if (!url || !/^https?:\/\//i.test(String(url))) throw new Error("Подай валиден webhook URL (напр. https://hook.eu2.make.com/...).");
+  try {
+    const res = await axios.post(String(url), (data && typeof data === "object") ? data : {}, {
+      headers: { "Content-Type": "application/json" },
+      timeout: 30000,
+    });
+    return { status: res.status, response: res.data };
+  } catch (error) {
+    const status = error.response?.status;
+    const body = error.response?.data;
+    throw new Error(`Webhook грешка${status ? ` (${status})` : ""}: ${body ? (typeof body === "object" ? JSON.stringify(body) : body) : error.message}`);
+  }
+}
+
+async function listConnections({ team_id } = {}) {
+  const teamId = await resolveTeamId(team_id);
+  const conns = await makePaginated("/connections", "connections", { params: { teamId }, pageLimit: 100, maxItems: 500 });
+  return { count: conns.length, connections: conns };
+}
+
+async function testConnection({ connection_id } = {}) {
+  if (!connection_id) throw new Error("connection_id е задължителен.");
+  return await makeRequest(`/connections/${encodeURIComponent(connection_id)}/test`, { method: "POST", data: {} });
+}
+
 // ============================================================================
 //  MCP дефиниции
 // ============================================================================
@@ -372,6 +418,12 @@ const tools = [
   { name: "make_add_record", description: "Add a new record to a Make.com data store. 'data' is an object with the record's fields (must match the data store's structure). 'key' is optional — Make auto-generates one if omitted.", inputSchema: { type: "object", properties: { data_store_id: { type: "string", description: "The data store ID" }, data: { type: "object", description: "The record's fields as an object" }, key: { type: "string", description: "Optional record key (auto-generated if omitted)" } }, required: ["data_store_id", "data"] } },
   { name: "make_update_record", description: "Replace an existing record in a Make.com data store, identified by its key. 'data' is the full new object for the record (it REPLACES the record).", inputSchema: { type: "object", properties: { data_store_id: { type: "string", description: "The data store ID" }, key: { type: "string", description: "The key of the record to replace" }, data: { type: "object", description: "The new record fields as an object (replaces the record)" } }, required: ["data_store_id", "key", "data"] } },
   { name: "make_delete_record", description: "Delete SPECIFIC record(s) from a Make.com data store by key(s). Pass 'keys' as an array of the record keys to delete — ONLY those are removed. Deleting ALL records is intentionally NOT supported here, for safety.", inputSchema: { type: "object", properties: { data_store_id: { type: "string", description: "The data store ID" }, keys: { type: "array", items: { type: "string" }, description: "Array of record keys to delete (only these are removed)" } }, required: ["data_store_id", "keys"] } },
+  { name: "make_list_incomplete", description: "List incomplete/failed executions (DLQ) of a Make.com scenario — runs that errored and are waiting. Use this before retrying.", inputSchema: { type: "object", properties: { scenario_id: { type: "string", description: "The scenario ID" }, limit: { type: "number", description: "Max entries (default 50, max 200)" } }, required: ["scenario_id"] } },
+  { name: "make_retry_execution", description: "Retry a single incomplete/failed execution (DLQ item) by its id (from make_list_incomplete). This RE-RUNS the failed execution.", inputSchema: { type: "object", properties: { dlq_id: { type: "string", description: "The incomplete-execution (DLQ) id from make_list_incomplete" } }, required: ["dlq_id"] } },
+  { name: "make_list_hooks", description: "List Make.com webhooks for a team. Returns each hook's id, name and its webhook URL (used by make_trigger_webhook). team_id falls back to the configured team or the only team.", inputSchema: { type: "object", properties: { team_id: { type: "string", description: "Team ID (optional; falls back to configured MAKE_TEAM_ID or the only team)" } }, required: [] } },
+  { name: "make_trigger_webhook", description: "Trigger a Make.com scenario by sending a POST to its webhook URL (from make_list_hooks). This FIRES the scenario for real. 'data' is an optional JSON payload sent to the webhook.", inputSchema: { type: "object", properties: { url: { type: "string", description: "The webhook URL to POST to (e.g. https://hook.eu2.make.com/...)" }, data: { type: "object", description: "Optional JSON payload sent to the webhook" } }, required: ["url"] } },
+  { name: "make_list_connections", description: "List Make.com connections (linked app accounts) for a team — id, name and app. Useful to see which integrations are connected. team_id falls back to the configured team or the only team.", inputSchema: { type: "object", properties: { team_id: { type: "string", description: "Team ID (optional; falls back to configured MAKE_TEAM_ID or the only team)" } }, required: [] } },
+  { name: "make_test_connection", description: "Verify whether a Make.com connection is still valid (Make re-checks the saved credentials against the app). Returns a 'verified' status.", inputSchema: { type: "object", properties: { connection_id: { type: "string", description: "The connection ID (from make_list_connections)" } }, required: ["connection_id"] } },
 ];
 
 async function handleTool(toolName, toolInput) {
@@ -391,11 +443,17 @@ async function handleTool(toolName, toolInput) {
     case "make_add_record": return await addRecord(toolInput);
     case "make_update_record": return await updateRecord(toolInput);
     case "make_delete_record": return await deleteRecord(toolInput);
+    case "make_list_incomplete": return await listIncomplete(toolInput);
+    case "make_retry_execution": return await retryExecution(toolInput);
+    case "make_list_hooks": return await listHooks(toolInput);
+    case "make_trigger_webhook": return await triggerWebhook(toolInput);
+    case "make_list_connections": return await listConnections(toolInput);
+    case "make_test_connection": return await testConnection(toolInput);
     default: throw new Error(`Unknown tool: ${toolName}`);
   }
 }
 
-const server = new Server({ name: "make-mcp", version: "1.2.0" }, { capabilities: { tools: {} } });
+const server = new Server({ name: "make-mcp", version: "1.3.0" }, { capabilities: { tools: {} } });
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
@@ -475,4 +533,4 @@ main().catch((error) => {
   console.error("Fatal error:", error);
   process.exit(1);
 });
-// v1.2.0
+// v1.3.0

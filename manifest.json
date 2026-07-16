@@ -2,8 +2,8 @@
   "manifest_version": "0.2",
   "name": "make-mcp",
   "display_name": "Make.com Integration for Tonkin Team",
-  "version": "1.2.0",
-  "description": "Make.com (Integromat) integration for the Tonkin team — list, run, activate/deactivate and monitor scenarios, plus manage data stores",
+  "version": "1.3.0",
+  "description": "Make.com (Integromat) integration for the Tonkin team — scenarios, executions, data stores, incomplete-execution retries, webhooks and connections",
   "author": {
     "name": "Tonkin Team"
   },
@@ -83,6 +83,30 @@
     {
       "name": "make_delete_record",
       "description": "Delete specific record(s) from a data store by key"
+    },
+    {
+      "name": "make_list_incomplete",
+      "description": "List incomplete/failed executions (DLQ) of a scenario"
+    },
+    {
+      "name": "make_retry_execution",
+      "description": "Retry a single incomplete/failed execution by id"
+    },
+    {
+      "name": "make_list_hooks",
+      "description": "List webhooks for a team (with their URLs)"
+    },
+    {
+      "name": "make_trigger_webhook",
+      "description": "Trigger a scenario by POSTing to its webhook URL"
+    },
+    {
+      "name": "make_list_connections",
+      "description": "List connections (linked app accounts) for a team"
+    },
+    {
+      "name": "make_test_connection",
+      "description": "Verify whether a connection is still valid"
     }
   ],
   "keywords": [
@@ -97,7 +121,7 @@
     "api_token": {
       "type": "string",
       "title": "Make API token",
-      "description": "API токенът от Make. Създава се от: аватара горе вдясно → Profile → API / MCP access → Add token. Дай му права (scopes): scenarios:read, scenarios:write, scenarios:run, teams:read, organizations:read, datastores:read, datastores:write.",
+      "description": "API токенът от Make. Създава се от: аватара горе вдясно → Profile → API / MCP access → Add token. Дай му права (scopes): scenarios:read, scenarios:write, scenarios:run, teams:read, organizations:read, datastores:read, datastores:write, dlqs:read, dlqs:write, hooks:read, connections:read, connections:write.",
       "required": true,
       "sensitive": true
     },
